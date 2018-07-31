@@ -16,18 +16,27 @@ class Run:
                 '`' + ' '.join(arg_list) + '` exited with code ' + str(self.exit_code) + ':\n' + self.stdout)
 
 class Network:
-    def __init__(self, name, ssid, psk=None, autoconnect=True):
+    def __init__(self, name, ssid, pswd_type, pswd=None, autoconnect=True):
         assert ssid != None, 'SSID can not be None'
+        if pswd_type == 'open':
+            assert pswd == None, 'open networks can not have a password'
+        elif pswd_type
+        assert (
+            (pswd_type == 'open' and pswd == None) or
+            (pswd_type == 'wpa' and pswd != None)
+            ), 'only open and wpa type networks are currently supported'
         self.name = name
+        self.pswd_type = pswd_type
         self.ssid = ssid
-        self.psk = psk
+        self.pswd = pswd
         self.autoconnect = autoconnect
 
     def __str__(self):
         return (
             '# ' + self.name + '\n' +
             'SSID: ' + self.ssid + '\n' +
-            ('' if self.psk == None else 'password: ' + self.psk + '\n') +
+            'type: ' + self.pswd_type + '\n' +
+            ('' if self.psk == None else 'password: ' + self.pswd + '\n') +
             ('' if self.autoconnect else 'don\'t autoconnect\n'))
 
 def nmcli_get_network_list():
@@ -36,16 +45,21 @@ def nmcli_get_network_list():
     return networks
 
 def nmcli_parse_single_network(name, data):
-    ssids = re.findall('\n.*\.ssid:\s*(.*)\n', data)
-    psks = re.findall('\n.*\.psk:\s*(.*)\n', data)
+    ssids = re.findall('\n802-11-wireless\.ssid:\s*(.*)\n', data)
+    psks = re.findall('\n802-11-wireless-security\.psk:\s*(.*)\n', data)
+    key_mgmts = re.findall('\n802-11-wireless-security\.key-mgmt:\s*(.*)\n', data)
     autoconnect_nos = re.findall('\n.*\.autoconnect:\s*(no)\n', data)
     assert len(ssids) == 1, 'could not properly detect SSID'
     assert len(psks) <= 1, 'found more then one password'
+    assert (
+        (len(key_mgmts) == 0 and len(psks) == 0) or
+        (len(key_mgmts) == 1 and key_mgmts[0] == 'wpa-psk' and len(psks) == 1)
+        ), 'unknown key management: ' + ' '.join(key_mgmts)
     autoconnect = len(autoconnect_nos) == 0
     psk = None
     if len(psks) == 1 and psks[0] != '--':
         psk = psks[0]
-    return Network(name, ssids[0], psk, autoconnect)
+    return Network(name, ssids[0], 'open' if psk == None else 'wpa', psk, autoconnect)
 
 def nmcli_get_and_parse(names):
     if not isinstance(names, list):
@@ -58,7 +72,7 @@ def nmcli_get_and_parse(names):
         try:
             networks.append(nmcli_parse_single_network(names[i], data[i]))
         except Exception as e:
-            print('error with \'' + names[i] + '\':' + str(e), file=sys.stderr)
+            print('error with \'' + names[i] + '\': ' + str(e), file=sys.stderr)
     return networks
 
 def nmcli_get_networks():
