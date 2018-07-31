@@ -31,7 +31,7 @@ class Network:
 
 def nmcli_get_network_list():
     out = Run([nmcli_path, '-f', 'NAME', 'connection'], raise_on_fail=True)
-    networks = out.stdout.split()[1:] # cut off "NAME" header
+    networks = [i.strip() for i in out.stdout.strip().split('\n')[1:]] # cut off "NAME" header
     return networks
 
 def parse_from_nmcli(name):
@@ -43,9 +43,19 @@ def parse_from_nmcli(name):
     assert len(psks) <= 1, 'found more then one password'
     autoconnect = len(autoconnect_nos) == 0
     psk = None
-    if len(psks) == 1:
+    if len(psks) == 1 and psks[0] != '--':
         psk = psks[0]
     return Network(name, ssids[0], psk, autoconnect)
 
+def get_all_from_nmcli():
+    names = nmcli_get_network_list()
+    networks = []
+    for name in names:
+        try:
+            networks.append(parse_from_nmcli(name))
+        except Exception as e:
+            print('error with \'' + name + '\': ' + str(e))
+    return networks
+
 if __name__ == '__main__':
-    print(parse_from_nmcli('CRRL'))
+    print('\n'.join([str(i) for i in get_all_from_nmcli()]))
