@@ -208,23 +208,30 @@ def json_save_networks(args, data):
     print('  ... Done')
 
 def import_networks(args, interface):
-    print('load_networks()')
-    print('    path: ' + str(args.path))
-    n = Nmcli.get_networks()
-    print('Parsed ' + str(len(n)) + ' networks\n')
-    #print('\n'.join([str(i) for i in n]))
-    n0 = Network.from_json(json.loads(json.dumps(n)))
-    print(json.dumps(n0, indent=2))
+    j = json_get_networks(args)
+    c = interface.get_networks(args)
+    n = get_new(c, j)
+    if n == []:
+        print('No new networks in JSON file')
+    else:
+        print('Networks to import:\n')
+        for i in n:
+            print(Network.to_str(i))
+        for i in n:
+            interface.add_network(i)
 
 def save_networks(args, interface):
     j = json_get_networks(args)
     c = interface.get_networks(args)
     n = get_new(j, c)
-    print('Networks to save:\n')
-    for i in n:
-        print(Network.to_str(i))
-    j += n
-    json_save_networks(args, j)
+    if n == []:
+        print('No new networks on system')
+    else:
+        print('Networks to save:\n')
+        for i in n:
+            print(Network.to_str(i))
+        j += n
+        json_save_networks(args, j)
 
 def show_networks(args, interface):
     j = json_get_networks(args)
