@@ -3,7 +3,6 @@ import subprocess
 import re
 import json
 
-nmcli_path = '/usr/bin/nmcli'
 default_json_path = '~/.config/wifi-conn-sync/networks.json'
 
 class Run:
@@ -62,91 +61,108 @@ class Network:
             ('' if 'pswd' not in data else '| password: ' + data['pswd'] + '\n') +
             ('' if data.get('autoconnect', True) else '| autoconnect disabled\n'))
 
-def nmcli_get_network_list():
-    out = Run([nmcli_path, '-f', 'NAME', 'connection'], raise_on_fail=True)
-    networks = [i.strip() for i in out.stdout.strip().split('\n')[1:]] # cut off "NAME" header
-    return networks
+class Nmcli:
+    bin_path = '/usr/bin/nmcli'
 
-def nmcli_parse_single_network(name, data):
-    ssids = re.findall('\n802-11-wireless\.ssid:\s*(.*)\n', data)
-    psks = re.findall('\n802-11-wireless-security\.psk:\s*(.*)\n', data)
-    key_mgmts = re.findall('\n802-11-wireless-security\.key-mgmt:\s*(.*)\n', data)
-    autoconnect_nos = re.findall('\n.*\.autoconnect:\s*(no)\n', data)
-    assert len(ssids) == 1, 'Could not properly detect SSID'
-    assert len(psks) <= 1, 'Found more then one password'
-    assert len(key_mgmts) <= 1, 'Found more then one key management'
-    psk = None
-    if len(psks) == 1 and psks[0] != '--':
-        psk = psks[0]
-    pswd_type = None
-    if len(key_mgmts) == 0:
-        pswd_type = 'open'
-    elif key_mgmts[0] == 'none':
-        raise AssertionError('WEP isn\'t properly supported yet')
-        pswd_type = 'wep'
-    elif key_mgmts[0] == 'wpa-psk':
-        pswd_type = 'wpa'
-    else:
-        raise AssertionError('Unknown key management: ' + ' '.join(key_mgmts))
-    autoconnect = len(autoconnect_nos) == 0
-    return Network.make(name, ssids[0], pswd_type, psk, autoconnect)
-
-def nmcli_get_and_parse(names):
-    if not isinstance(names, list):
-        names = [names]
-    out = Run([nmcli_path, '--show-secrets', 'connection', 'show'] + names, raise_on_fail=True)
-    data = out.stdout.split('\n\n')
-    assert len(data) == len(names), 'nmcli gave the wrong number of networks'
-    networks = []
-    for i in range(len(data)):
+    def is_usable():
         try:
-            networks.append(nmcli_parse_single_network(names[i], data[i]))
-        except Exception as e:
-            print('Error with \'' + names[i] + '\': ' + str(e), file=sys.stderr)
-    return networks
+            Run([Nmcli.bin_path, '-v'], raise_on_fail=True)
+            return True
+        except:
+            return False
 
-def nmcli_get_networks(args):
-    print('Loading network list...')
-    names = nmcli_get_network_list()
-    print('                    ... Done')
-    try:
-        print('Loading network details...')
-        networks = nmcli_get_and_parse(names)
-        print('                       ... Done')
+    def get_network_list():
+        out = Run([Nmcli.bin_path, '-f', 'NAME', 'connection'], raise_on_fail=True)
+        networks = [i.strip() for i in out.stdout.strip().split('\n')[1:]] # cut off "NAME" header
         return networks
-    except Exception as e:
-        print('Error: ' + str(e) + ', falling back to individual parsing', file=sys.stderr)
-        print('Parsing networks individually...')
+
+    def parse_single_network(name, data):
+        ssids = re.findall('\n802-11-wireless\.ssid:\s*(.*)\n', data)
+        psks = re.findall('\n802-11-wireless-security\.psk:\s*(.*)\n', data)
+        key_mgmts = re.findall('\n802-11-wireless-security\.key-mgmt:\s*(.*)\n', data)
+        autoconnect_nos = re.findall('\n.*\.autoconnect:\s*(no)\n', data)
+        assert len(ssids) == 1, 'Could not properly detect SSID'
+        assert len(psks) <= 1, 'Found more then one password'
+        assert len(key_mgmts) <= 1, 'Found more then one key management'
+        psk = None
+        if len(psks) == 1 and psks[0] != '--':
+            psk = psks[0]
+        pswd_type = None
+        if len(key_mgmts) == 0:
+            pswd_type = 'open'
+        elif key_mgmts[0] == 'none':
+            raise AssertionError('WEP isn\'t properly supported yet')
+            pswd_type = 'wep'
+        elif key_mgmts[0] == 'wpa-psk':
+            pswd_type = 'wpa'
+        else:
+            raise AssertionError('Unknown key management: ' + ' '.join(key_mgmts))
+        autoconnect = len(autoconnect_nos) == 0
+        return Network.make(name, ssids[0], pswd_type, psk, autoconnect)
+
+    def get_and_parse(names):
+        if not isinstance(names, list):
+            names = [names]
+        out = Run([Nmcli.bin_path, '--show-secrets', 'connection', 'show'] + names, raise_on_fail=True)
+        data = out.stdout.split('\n\n')
+        assert len(data) == len(names), 'nmcli gave the wrong number of networks'
         networks = []
-        for name in names:
+        for i in range(len(data)):
             try:
-                networks += nmcli_get_and_parse(name)
+                networks.append(Nmcli.parse_single_network(names[i], data[i]))
             except Exception as e:
-                print('Error with \'' + name + '\': ' + str(e), file=sys.stderr)
-        print('                             ... Done')
+                print('Error with \'' + names[i] + '\': ' + str(e), file=sys.stderr)
         return networks
 
-def nmcli_add_network(n):
-    args = [nmcli_path, 'connection', 'add',
-        'type', 'wifi',
-        'ifname', '*',
-        'con-name', n['name'],
-        'ssid', n['ssid'],
-        'save', 'yes',
-        'autoconnect', 'yes' if n.get('autoconnect', True) else 'no']
-    pswd_type = n.get('pswd_type', 'NO_PSWD_TYPE_SPECIFIED')
-    if pswd_type == 'open':
-        pass
-    elif pswd_type == 'wpa':
-        args += ['802-11-wireless-security.key-mgmt', 'wpa-psk']
-        if 'pswd' in n:
-            args += ['802-11-wireless-security.psk', n['pswd']]
-    elif pswd_type == 'wep':
-        raise AssertionError('WEP not yet supported')
+    def get_networks(args):
+        print('Loading network list...')
+        names = Nmcli.get_network_list()
+        print('                    ... Done')
+        try:
+            print('Loading network details...')
+            networks = Nmcli.get_and_parse(names)
+            print('                       ... Done')
+            return networks
+        except Exception as e:
+            print('Error: ' + str(e) + ', falling back to individual parsing', file=sys.stderr)
+            print('Parsing networks individually...')
+            networks = []
+            for name in names:
+                try:
+                    networks += Nmcli.get_and_parse(name)
+                except Exception as e:
+                    print('Error with \'' + name + '\': ' + str(e), file=sys.stderr)
+            print('                             ... Done')
+            return networks
+
+    def add_network(n):
+        args = [Nmcli.bin_path, 'connection', 'add',
+            'type', 'wifi',
+            'ifname', '*',
+            'con-name', n['name'],
+            'ssid', n['ssid'],
+            'save', 'yes',
+            'autoconnect', 'yes' if n.get('autoconnect', True) else 'no']
+        pswd_type = n.get('pswd_type', 'NO_PSWD_TYPE_SPECIFIED')
+        if pswd_type == 'open':
+            pass
+        elif pswd_type == 'wpa':
+            args += ['802-11-wireless-security.key-mgmt', 'wpa-psk']
+            if 'pswd' in n:
+                args += ['802-11-wireless-security.psk', n['pswd']]
+        elif pswd_type == 'wep':
+            raise AssertionError('WEP not yet supported')
+        else:
+            raise AssertionError('unknown type: ' + pswd_type)
+        result = Run(args, raise_on_fail=True)
+        print('Network added:\n' + Network.to_str(n))
+
+def get_system_interface():
+    if Nmcli.is_usable():
+        return Nmcli
     else:
-        raise AssertionError('unknown type: ' + pswd_type)
-    result = Run(args, raise_on_fail=True)
-    print('Network added:\n' + Network.to_str(n))
+        print('Nmcli failed, no usable system interfaces detected', file=sys.stderr)
+        return None
 
 def get_new(old_list, new_list):
     old_dict = {}
@@ -174,23 +190,23 @@ def json_get_networks(args):
     print('             ... Done')
     return ret
 
-def import_networks(args):
+def import_networks(args, interface):
     print('load_networks()')
     print('    path: ' + str(args.path))
-    n = nmcli_get_networks()
+    n = Nmcli.get_networks()
     print('Parsed ' + str(len(n)) + ' networks\n')
     #print('\n'.join([str(i) for i in n]))
     n0 = Network.from_json(json.loads(json.dumps(n)))
     print(json.dumps(n0, indent=2))
 
-def save_networks(args):
+def save_networks(args, interface):
     print('save_networks()')
     print('    path: ' + str(args.path))
     print('    split: ' + str(args.split))
 
-def show_networks(args):
+def show_networks(args, interface):
     j = json_get_networks(args)
-    c = nmcli_get_networks(args)
+    c = interface.get_networks(args)
     print('New networks in JSON file:\n')
     for i in get_new(c, j):
         print(Network.to_str(i))
@@ -223,4 +239,9 @@ if __name__ == '__main__':
         parser.print_help()
         exit(1)
 
-    args.func(args)
+    interface = get_system_interface()
+    if interface == None:
+        print('No system interface found, exiting', file=sys.stderr)
+        exit(1)
+
+    args.func(args, interface)
