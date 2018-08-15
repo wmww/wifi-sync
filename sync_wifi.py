@@ -25,20 +25,12 @@ class Network:
 
     def from_json_single(data):
         assert 'ssid' in data, 'no SSID in ' + str(data)
-        ssid = data['ssid']
-        name = ssid
-        if 'name' in data:
-            name = data['name']
-        pswd_type = 'open'
-        if 'pswd_type' in data:
-            pswd_type = data['pswd_type']
-        pswd=None
-        if 'pswd' in data:
-            pswd = data['pswd']
-        autoconnect=None
-        if 'autoconnect' in data:
-            autoconnect = data['autoconnect']
-        return Network.make(name, ssid, pswd_type, pswd, autoconnect)
+        return Network.make(
+            data.get('name', data.get('ssid')), # name
+            data['ssid'], # ssid
+            data.get('pswd_type', 'open'), # pswd_type
+            data.get('pswd', None), # pswd
+            data.get('autoconnect', True)) # autoconnect
 
     def make(name, ssid, pswd_type, pswd=None, autoconnect=True):
         assert ssid != None, 'SSID can not be None'
@@ -57,7 +49,8 @@ class Network:
         data['pswd_type'] = pswd_type
         if pswd != None:
             data['pswd'] = pswd
-        data['autoconnect'] = autoconnect
+        if autoconnect == False:
+            data['autoconnect'] = False
         return data
 
     def to_string(data):
