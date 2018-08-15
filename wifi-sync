@@ -6,7 +6,7 @@ import subprocess
 import re
 import json
 
-default_json_path = '~/.config/wifi-conn-sync/networks.json'
+default_json_path = '~/.config/wifi-sync/networks.json'
 
 class Run:
     def __init__(self, arg_list, stdin_text=None, raise_on_fail=False):
@@ -21,21 +21,6 @@ class Run:
                 '`' + ' '.join(arg_list) + '` exited with code ' + str(self.exit_code) + ':\n' + self.stdout)
 
 class Network:
-    def from_json(data):
-        if isinstance(data, list):
-            return [Network.from_json_single(i) for i in data]
-        else:
-            return Network.from_json_single(data)
-
-    def from_json_single(data):
-        assert 'ssid' in data, 'no SSID in ' + str(data)
-        return Network.make(
-            data.get('name', data.get('ssid')), # name
-            data['ssid'], # ssid
-            data.get('pswd_type', 'open'), # pswd_type
-            data.get('pswd', None), # pswd
-            data.get('autoconnect', True)) # autoconnect
-
     def make(name, ssid, pswd_type, pswd=None, autoconnect=True):
         assert ssid != None, 'SSID can not be None'
         if name == None:
@@ -202,31 +187,50 @@ def json_save_networks(args, data):
     except Exception as e:
         print('Failed to write to ' + path + ' (' + str(e) + ')', file=sys.stderr)
 
-def import_networks(args, interface):
-    j = json_get_networks(args)
-    c = interface.get_networks(args)
-    n = get_new(c, j)
-    if n == []:
+def show_importing(saved, current, args):
+    new = get_new(current, saved)
+    if new == []:
         print('No new networks in JSON file')
     else:
         print('Networks to import:\n')
-        for i in n:
-            print(Network.to_str(i))
-        for i in n:
+        for i in new:
+            if len(new) < 7:
+                print(Network.to_str(i))
+            else:
+                print('  ' + i.get('name', i['ssid']))
+        for i in new:
             interface.add_network(i)
 
-def save_networks(args, interface):
-    j = json_get_networks(args)
-    c = interface.get_networks(args)
-    n = get_new(j, c)
-    if n == []:
+def show_exporting(saved, current, args):
+    new = get_new(saved, current)
+    if new == []:
         print('No new networks on system')
     else:
         print('Networks to save:\n')
-        for i in n:
-            print(Network.to_str(i))
-        j += n
-        json_save_networks(args, j)
+        for i in new:
+            if len(new) < 7:
+                print(Network.to_str(i))
+            else:
+                print('  ' + i.get('name', i['ssid']))
+        saved += new
+        json_save_networks(args, saved)
+
+def import_networks(args, interface):
+    j = json_get_networks(args)
+    c = interface.get_networks(args)
+    show_importing(j, c, args)
+
+def export_networks(args, interface):
+    j = json_get_networks(args)
+    c = interface.get_networks(args)
+    show_exporting(j, c, args)
+
+def update_networks(args, interface):
+    j = json_get_networks(args)
+    c = interface.get_networks(args)
+    show_exporting(j, c, args)
+    j = json_get_networks(args)
+    show_importing(j, c, args)
 
 def show_networks(args, interface):
     j = json_get_networks(args)
@@ -240,20 +244,25 @@ def show_networks(args, interface):
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser(description='Save and load WiFi networks and passwords; for syncing between devices')
+    parser = argparse.ArgumentParser(description='Save and load WiFi networks and passwords to JSON')
     subparsers = parser.add_subparsers()
     # subparsers.required = True
     # subparsers.dest = 'command'
 
-    parser_load = subparsers.add_parser('import', help='Import a file or directory with WiFi networks')
+    parser_load = subparsers.add_parser('import', help='Import WiFi networks from a JSON file')
     parser_load.set_defaults(func=import_networks)
     parser_load.add_argument('-f', '--file', type=str, help='File to import networks from, default is ' + default_json_path)
 
-    parser_load = subparsers.add_parser('save', help='Save WiFi networks to a file or directory')
-    parser_load.set_defaults(func=save_networks)
-    parser_load.add_argument('-f', '--file', type=str, help='File to save networks to, default is ' + default_json_path)
+    parser_load = subparsers.add_parser('export', help='Export WiFi networks to a JSON file')
+    parser_load.set_defaults(func=export_networks)
+    parser_load.add_argument('-f', '--file', type=str, help='File to export networks to, default is ' + default_json_path)
 
-    parser_load = subparsers.add_parser('show', help='Show WiFi networks loaded from file and detected from system')
+    parser_load = subparsers.add_parser('update', help='Import and export')
+    parser_load.set_defaults(func=update_networks)
+    parser_load.add_argument('-f', '--file', type=str, help='JSON file to use, default is ' + default_json_path)
+
+
+    parser_load = subparsers.add_parser('show', help='Show all WiFi networks loaded from the JSON file and detected from system')
     parser_load.set_defaults(func=show_networks)
     parser_load.add_argument('-f', '--file', type=str, help='File to load networks from, default is ' + default_json_path)
 
