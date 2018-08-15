@@ -4,6 +4,7 @@ import re
 import json
 
 nmcli_path = '/usr/bin/nmcli'
+default_json_path = '~/.config/wifi-conn-sync/networks.json'
 
 class Run:
     def __init__(self, arg_list, stdin_text=None, raise_on_fail=False):
@@ -37,12 +38,12 @@ class Network:
         if name == None:
             name = ssid
         if pswd_type == 'open':
-            assert pswd == None, 'open networks can not have a password'
+            assert pswd == None, 'Open networks can not have a password'
         elif pswd_type == 'wpa': # or pswd_type == 'wep':
             #assert pswd != None, pswd_type + ' networks must have password'
             pass
         else:
-            raise AssertionError('unknown password type \'' + pswd_type + '\'')
+            raise AssertionError('Unknown password type \'' + pswd_type + '\'')
         data = {}
         data['name'] = name
         data['ssid'] = ssid
@@ -53,13 +54,13 @@ class Network:
             data['autoconnect'] = False
         return data
 
-    def to_string(data):
+    def to_str(data):
         return (
             '| name: ' + data['name'] + '\n' +
             '| SSID: ' + data['ssid'] + '\n' +
             '| type: ' + data['pswd_type'] + '\n' +
             ('' if 'pswd' not in data else '| password: ' + data['pswd'] + '\n') +
-            ('' if data['autoconnect'] else '| autoconnect disabled\n'))
+            ('' if data.get('autoconnect', True) else '| autoconnect disabled\n'))
 
 def nmcli_get_network_list():
     out = Run([nmcli_path, '-f', 'NAME', 'connection'], raise_on_fail=True)
@@ -71,9 +72,9 @@ def nmcli_parse_single_network(name, data):
     psks = re.findall('\n802-11-wireless-security\.psk:\s*(.*)\n', data)
     key_mgmts = re.findall('\n802-11-wireless-security\.key-mgmt:\s*(.*)\n', data)
     autoconnect_nos = re.findall('\n.*\.autoconnect:\s*(no)\n', data)
-    assert len(ssids) == 1, 'could not properly detect SSID'
-    assert len(psks) <= 1, 'found more then one password'
-    assert len(key_mgmts) <= 1, 'found more then one key management'
+    assert len(ssids) == 1, 'Could not properly detect SSID'
+    assert len(psks) <= 1, 'Found more then one password'
+    assert len(key_mgmts) <= 1, 'Found more then one key management'
     psk = None
     if len(psks) == 1 and psks[0] != '--':
         psk = psks[0]
@@ -86,7 +87,7 @@ def nmcli_parse_single_network(name, data):
     elif key_mgmts[0] == 'wpa-psk':
         pswd_type = 'wpa'
     else:
-        raise AssertionError('unknown key management: ' + ' '.join(key_mgmts))
+        raise AssertionError('Unknown key management: ' + ' '.join(key_mgmts))
     autoconnect = len(autoconnect_nos) == 0
     return Network.make(name, ssids[0], pswd_type, psk, autoconnect)
 
@@ -101,55 +102,83 @@ def nmcli_get_and_parse(names):
         try:
             networks.append(nmcli_parse_single_network(names[i], data[i]))
         except Exception as e:
-            print('error with \'' + names[i] + '\': ' + str(e), file=sys.stderr)
+            print('Error with \'' + names[i] + '\': ' + str(e), file=sys.stderr)
     return networks
 
-def nmcli_get_networks():
-    print('loading network list...')
+def nmcli_get_networks(args):
+    print('Loading network list...')
     names = nmcli_get_network_list()
-    print('...done')
+    print('                    ... Done')
     try:
-        print('loading network details...')
+        print('Loading network details...')
         networks = nmcli_get_and_parse(names)
-        print('...done')
+        print('                       ... Done')
         return networks
     except Exception as e:
-        print('error: ' + str(e) + ', falling back to parsing networks individually', file=sys.stderr)
+        print('Error: ' + str(e) + ', falling back to individual parsing', file=sys.stderr)
+        print('Parsing networks individually...')
         networks = []
         for name in names:
             try:
                 networks += nmcli_get_and_parse(name)
             except Exception as e:
-                print('error with \'' + name + '\': ' + str(e), file=sys.stderr)
-        print('...done')
+                print('Error with \'' + name + '\': ' + str(e), file=sys.stderr)
+        print('                             ... Done')
         return networks
 
 def nmcli_add_network(n):
     args = [nmcli_path, 'connection', 'add',
         'type', 'wifi',
         'ifname', '*',
-        'con-name', n.name,
-        'ssid', n.ssid,
+        'con-name', n['name'],
+        'ssid', n['ssid'],
         'save', 'yes',
-        'autoconnect', 'yes' if n.autoconnect else 'no']
-    if n.pswd_type == 'open':
+        'autoconnect', 'yes' if n.get('autoconnect', True) else 'no']
+    pswd_type = n.get('pswd_type', 'NO_PSWD_TYPE_SPECIFIED')
+    if pswd_type == 'open':
         pass
-    elif n.pswd_type == 'wpa':
+    elif pswd_type == 'wpa':
         args += ['802-11-wireless-security.key-mgmt', 'wpa-psk']
-        if n.pswd != None:
-            args += ['802-11-wireless-security.psk', n.pswd]
-    elif n.pswd_type == 'wep':
+        if 'pswd' in n:
+            args += ['802-11-wireless-security.psk', n['pswd']]
+    elif pswd_type == 'wep':
         raise AssertionError('WEP not yet supported')
     else:
-        raise AssertionError('unknown type: ' + n.pswd_type)
+        raise AssertionError('unknown type: ' + pswd_type)
     result = Run(args, raise_on_fail=True)
-    print('network added:\n' + str(n))
+    print('Network added:\n' + Network.to_str(n))
 
-def load_networks(args):
+def get_new(old_list, new_list):
+    old_dict = {}
+    for i in old_list:
+        old_dict[i['ssid']] = True
+    ret = []
+    for i in new_list:
+        if i['ssid'] not in old_dict:
+            ret.append(i)
+    return ret
+
+def json_get_networks(args):
+    path = default_json_path
+    if args.file != None:
+        path = args.file
+    print('loading ' + path + '...')
+    contents = '[]'
+    try:
+        open(path, "r").read()
+    except FileNotFoundError:
+        print('File ' + path + ' not found, not reading', file=sys.stderr)
+    print('        ' + ' ' * len(path) + '... Done')
+    print('Decoding JSON...')
+    ret = json.loads(contents)
+    print('             ... Done')
+    return ret
+
+def import_networks(args):
     print('load_networks()')
     print('    path: ' + str(args.path))
     n = nmcli_get_networks()
-    print('parsed ' + str(len(n)) + ' networks\n')
+    print('Parsed ' + str(len(n)) + ' networks\n')
     #print('\n'.join([str(i) for i in n]))
     n0 = Network.from_json(json.loads(json.dumps(n)))
     print(json.dumps(n0, indent=2))
@@ -159,6 +188,16 @@ def save_networks(args):
     print('    path: ' + str(args.path))
     print('    split: ' + str(args.split))
 
+def show_networks(args):
+    j = json_get_networks(args)
+    c = nmcli_get_networks(args)
+    print('New networks in JSON file:\n')
+    for i in get_new(c, j):
+        print(Network.to_str(i))
+    print('New networks on system:\n')
+    for i in get_new(j, c):
+        print(Network.to_str(i))
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Save and load WiFi networks and passwords; for syncing between devices')
@@ -166,14 +205,17 @@ if __name__ == '__main__':
     # subparsers.required = True
     # subparsers.dest = 'command'
 
-    parser_load = subparsers.add_parser('load', help='load a file or directory with WiFi networks')
-    parser_load.set_defaults(func=load_networks)
-    parser_load.add_argument('-p', '--path', type=str, help='file or directory to load networks from')
+    parser_load = subparsers.add_parser('import', help='Import a file or directory with WiFi networks')
+    parser_load.set_defaults(func=import_networks)
+    parser_load.add_argument('-f', '--file', type=str, help='File to import networks from, default is ' + default_json_path)
 
-    parser_load = subparsers.add_parser('save', help='save WiFi networks to a file or directory')
+    parser_load = subparsers.add_parser('save', help='Save WiFi networks to a file or directory')
     parser_load.set_defaults(func=save_networks)
-    parser_load.add_argument('-f', '--file', type=str, help='file to save networks to')
-    parser_load.add_argument('-d', '--directory', type=str, help='directory to save network files to')
+    parser_load.add_argument('-f', '--file', type=str, help='File to save networks to, default is ' + default_json_path)
+
+    parser_load = subparsers.add_parser('show', help='Show WiFi networks loaded from file and detected from system')
+    parser_load.set_defaults(func=show_networks)
+    parser_load.add_argument('-f', '--file', type=str, help='File to load networks from, default is ' + default_json_path)
 
     args = parser.parse_args()
 
