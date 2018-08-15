@@ -1,4 +1,5 @@
 import sys
+import os
 import subprocess
 import re
 import json
@@ -7,8 +8,10 @@ default_json_path = '~/.config/wifi-conn-sync/networks.json'
 
 class Run:
     def __init__(self, arg_list, stdin_text=None, raise_on_fail=False):
+        print('Running `' + ' '.join(arg_list) + '`...')
         p = subprocess.Popen(arg_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = p.communicate(stdin_text)
+        print('  ... Done')
         self.stdout = stdout.decode('utf-8') if stdout != None else ''
         self.stderr = stderr.decode('utf-8') if stderr != None else ''
         self.exit_code = p.returncode
@@ -117,11 +120,11 @@ class Nmcli:
     def get_networks(args):
         print('Loading network list...')
         names = Nmcli.get_network_list()
-        print('                    ... Done')
+        print('  ... Done')
         try:
             print('Loading network details...')
             networks = Nmcli.get_and_parse(names)
-            print('                       ... Done')
+            print('  ... Done')
             return networks
         except Exception as e:
             print('Error: ' + str(e) + ', falling back to individual parsing', file=sys.stderr)
@@ -132,7 +135,7 @@ class Nmcli:
                     networks += Nmcli.get_and_parse(name)
                 except Exception as e:
                     print('Error with \'' + name + '\': ' + str(e), file=sys.stderr)
-            print('                             ... Done')
+            print('  ... Done')
             return networks
 
     def add_network(n):
@@ -178,17 +181,31 @@ def json_get_networks(args):
     path = default_json_path
     if args.file != None:
         path = args.file
-    print('loading ' + path + '...')
+    print('Loading ' + path + '...')
     contents = '[]'
     try:
-        open(path, "r").read()
+        contents = open(path, "r").read()
     except FileNotFoundError:
         print('File ' + path + ' not found, not reading', file=sys.stderr)
-    print('        ' + ' ' * len(path) + '... Done')
+    print('  ... Done')
     print('Decoding JSON...')
     ret = json.loads(contents)
-    print('             ... Done')
+    print('  ... Done')
     return ret
+
+def json_save_networks(args, data):
+    path = default_json_path
+    if args.file != None:
+        path = args.file
+    if path == default_json_path:
+        os.makedirs(os.path.dirname(default_json_path), exist_ok=True)
+    print('Saving to ' + path + '...')
+    contents = json.dumps(data, indent=2)
+    try:
+        open(path, "w").write(contents)
+    except Exception as e:
+        print('Failed to write to ' + path + ' (' + str(e) + ')', file=sys.stderr)
+    print('  ... Done')
 
 def import_networks(args, interface):
     print('load_networks()')
@@ -200,9 +217,14 @@ def import_networks(args, interface):
     print(json.dumps(n0, indent=2))
 
 def save_networks(args, interface):
-    print('save_networks()')
-    print('    path: ' + str(args.path))
-    print('    split: ' + str(args.split))
+    j = json_get_networks(args)
+    c = interface.get_networks(args)
+    n = get_new(j, c)
+    print('Networks to save:\n')
+    for i in n:
+        print(Network.to_str(i))
+    j += n
+    json_save_networks(args, j)
 
 def show_networks(args, interface):
     j = json_get_networks(args)
