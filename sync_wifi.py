@@ -123,7 +123,38 @@ def nmcli_add_network(n):
     result = Run(args, raise_on_fail=True)
     print('network added:\n' + str(n))
 
+def load_networks(args):
+    print('load_networks()')
+    print('    path: ' + args.path)
+    #n = nmcli_get_networks()
+    #print('parsed ' + str(len(n)) + ' networks\n')
+    #print('\n'.join([str(i) for i in n]))
+
+def save_networks(args):
+    print('save_networks()')
+    print('    path: ' + args.path)
+    print('    split: ' + str(args.split))
+
 if __name__ == '__main__':
-    n = nmcli_get_networks()
-    print('parsed ' + str(len(n)) + ' networks\n')
-    print('\n'.join([str(i) for i in n]))
+    import argparse
+    parser = argparse.ArgumentParser(description='Save and load WiFi networks and passwords; for syncing between devices')
+    subparsers = parser.add_subparsers()
+    # subparsers.required = True
+    # subparsers.dest = 'command'
+
+    parser_load = subparsers.add_parser('load', help='load a file or directory with WiFi networks')
+    parser_load.set_defaults(func=load_networks)
+    parser_load.add_argument('path', type=str, help='file or directory')
+
+    parser_load = subparsers.add_parser('save', help='save WiFi networks to a file or directory')
+    parser_load.set_defaults(func=save_networks)
+    parser_load.add_argument('path', type=str, help='file or directory')
+    parser_load.add_argument('-s', '--split', action='store_true', help='split networks into different files')
+
+    args = parser.parse_args()
+
+    if not hasattr(args, 'func'):
+        parser.print_help()
+        exit(1)
+
+    args.func(args)
