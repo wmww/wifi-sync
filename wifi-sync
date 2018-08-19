@@ -6,7 +6,7 @@ import subprocess
 import re
 import json
 
-default_json_path = '~/.config/wifi-sync/networks.json'
+default_json_path = os.path.expanduser('~') + '/.config/wifi-sync/networks.json'
 
 class Run:
     def __init__(self, arg_list, stdin_text=None, raise_on_fail=False):
