@@ -18,7 +18,7 @@ class Run:
         self.exit_code = p.returncode
         if raise_on_fail and self.exit_code != 0:
             raise AssertionError(
-                '`' + ' '.join(arg_list) + '` exited with code ' + str(self.exit_code) + ':\n' + self.stdout)
+                '`' + ' '.join(arg_list) + '` exited with code ' + str(self.exit_code) + ':\n' + self.stderr)
 
 class Network:
     def make(name, ssid, pswd_type, pswd=None, autoconnect=True):
