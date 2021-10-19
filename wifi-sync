@@ -8,7 +8,7 @@ import subprocess
 import re
 import json
 import argparse
-from typing import Optional, Any
+from typing import Optional, Any, Tuple
 
 default_json_path = os.path.expanduser('~') + '/.config/wifi-sync/networks.json'
 
@@ -41,20 +41,20 @@ class NetworkInfo:
         assert isinstance(autoconnect, bool), 'autoconnect has invalid type'
         if name is None:
             name = ssid
-        self.name = name
-        self.ssid = ssid
+        self.name: str = name
+        self.ssid: str = ssid
         if pswd_type == 'open':
             assert pswd is None, 'Open networks can not have a password'
         elif pswd_type == 'wpa':
             pass
         else:
             raise AssertionError('Unknown password type \'' + pswd_type + '\'')
-        self.pswd_type = pswd_type
-        self.pswd = pswd
-        self.autoconnect = autoconnect
+        self.pswd_type: str = pswd_type
+        self.pswd: Optional[str] = pswd
+        self.autoconnect: bool = autoconnect
 
     @staticmethod
-    def parse(data: dict[str, Any]) -> NetworkInfo:
+    def parse(data: dict[str, Any]) -> 'NetworkInfo':
         return NetworkInfo(
             data.get('name'),
             data['ssid'],
@@ -83,31 +83,87 @@ class NetworkInfo:
             ('' if self.pswd is None else '| password: ' + self.pswd + '\n') +
             ('' if self.autoconnect else '| autoconnect disabled\n'))
 
+def format_network_list(title: str, networks: list[NetworkInfo]) -> str:
+    result = title + ':\n'
+    for network in networks:
+        if len(networks) < 7:
+            result += str(network) + '\n'
+        else:
+            result += '  ' + network.name + '\n'
+    return result
+
 class NetworkInterface:
-    def get_networks(self, args: argparse.Namespace) -> list[NetworkInfo]:
+    def __init__(self):
+        self.current: Optional[List[NetworkInfo]] = None
+        self.pending: List[NetworkInfo] = []
+
+    def __str__(self) -> str:
         raise NotImplementedError()
 
-    def add_network(self, n: NetworkInfo) -> None:
+    def load(self) -> None:
+        '''Loads the current state'''
         raise NotImplementedError()
+
+    def commit(self) -> None:
+        '''Saves and clears pending networks'''
+        raise NotImplementedError()
+
+    def get_current(self) -> list[NetworkInfo]:
+        assert self.current is not None, str(self) + ' not loaded'
+        return self.current
+
+    def queue_network(self, network: NetworkInfo) -> None:
+        '''Puts the network in pending if it's not already known'''
+        for known in self.get_current() + self.pending:
+            if known.ssid == network.ssid:
+                return
+        print(network.ssid, 'is not in', ' '.join([a.ssid for a in self.get_current()]))
+        self.pending.append(network)
+
+    def queue_all_networks(self, networks: list[NetworkInfo]) -> None:
+        '''Puts any new networks in pending'''
+        for network in networks:
+            self.queue_network(network)
+
 
 class Nmcli(NetworkInterface):
     def __init__(self):
+        super().__init__()
         self.bin_path = '/usr/bin/nmcli'
         Run([self.bin_path, '-v'], raise_on_fail=True)
+        self.conn_id_re = re.compile(r'^connection\.id:\s*(.*)$', flags=re.MULTILINE)
+        self.conn_type_re = re.compile(r'^connection\.type:\s*(.*)$', flags=re.MULTILINE)
+        self.ssid_re = re.compile(r'^802-11-wireless\.ssid:\s*(.*)$', flags=re.MULTILINE)
+        self.psk_re = re.compile(r'^802-11-wireless-security\.psk:\s*(.*)$', flags=re.MULTILINE)
+        self.key_mgmt_re = re.compile(r'^802-11-wireless-security\.key-mgmt:\s*(.*)$', flags=re.MULTILINE)
+        self.autoconnect_no_re = re.compile(r'^.*\.autoconnect:\s*(no)$', flags=re.MULTILINE)
 
-    def get_network_list(self) -> list[str]:
+    def __str__(self) -> str:
+        return 'NetworkManager'
+
+    def name_list(self) -> list[str]:
         out = Run([self.bin_path, '-f', 'NAME', 'connection'], raise_on_fail=True)
         networks = [i.strip() for i in out.stdout.strip().split('\n')[1:]] # cut off "NAME" header
-        return networks
+        return list(set(networks))
 
-    def parse_single_network(self, name: str, data: str) -> NetworkInfo:
-        ssids = re.findall('\n802-11-wireless\.ssid:\s*(.*)\n', data)
-        psks = re.findall('\n802-11-wireless-security\.psk:\s*(.*)\n', data)
-        key_mgmts = re.findall('\n802-11-wireless-security\.key-mgmt:\s*(.*)\n', data)
-        autoconnect_nos = re.findall('\n.*\.autoconnect:\s*(no)\n', data)
+    def parse_single_network(self, data: str) -> Optional[NetworkInfo]:
+        conn_types = self.conn_type_re.findall(data)
+        assert len(conn_types) == 1, 'Could not properly detect connection type'
+        if conn_types[0] == '802-11-wireless':
+            pass
+        elif conn_types[0] == '802-3-ethernet' or conn_types[0] == 'bridge':
+            return None
+        else:
+            raise AssertionError('Invalid connection type ' + conn_types[0])
+        conn_ids = self.conn_id_re.findall(data)
+        ssids = self.ssid_re.findall(data)
+        psks = self.psk_re.findall(data)
+        key_mgmts = self.key_mgmt_re.findall(data)
+        autoconnect_nos = self.autoconnect_no_re.findall(data)
+        assert len(conn_ids) == 1, 'Could not properly detect connection ID'
         assert len(ssids) == 1, 'Could not properly detect SSID'
         assert len(psks) <= 1, 'Found more then one password'
-        assert len(key_mgmts) <= 1, 'Found more then one key management'
+        assert len(key_mgmts) <= 1, 'Found more then one key management:\n'
         psk = None
         if len(psks) == 1 and psks[0] != '--':
             psk = psks[0]
@@ -115,46 +171,33 @@ class Nmcli(NetworkInterface):
         if len(key_mgmts) == 0:
             pswd_type = 'open'
         elif key_mgmts[0] == 'none':
-            raise AssertionError('WEP isn\'t properly supported yet')
-            pswd_type = 'wep'
+            # This means WEP, which isn't supported
+            # pswd_type = 'wep'
+            return None
         elif key_mgmts[0] == 'wpa-psk':
             pswd_type = 'wpa'
         else:
             raise AssertionError('Unknown key management: ' + ' '.join(key_mgmts))
         autoconnect = len(autoconnect_nos) == 0
-        return NetworkInfo(name, ssids[0], pswd_type, psk, autoconnect)
+        return NetworkInfo(conn_ids[0], ssids[0], pswd_type, psk, autoconnect)
 
-    def get_and_parse(self, names: list[str]) -> list[NetworkInfo]:
+    def parse_network_list(self, names: list[str]) -> list[NetworkInfo]:
         out = Run([self.bin_path, '--show-secrets', 'connection', 'show'] + names, raise_on_fail=True)
         data = out.stdout.split('\n\n')
-        assert len(data) == len(names), 'nmcli gave the wrong number of networks'
         networks = []
         for i in range(len(data)):
-            try:
-                networks.append(self.parse_single_network(names[i], data[i]))
-            except Exception as e:
-                print('Error with \'' + names[i] + '\': ' + str(e), file=sys.stderr)
+            network = self.parse_single_network(data[i])
+            if network is not None:
+                networks.append(network)
         return networks
 
-    def get_networks(self, args: argparse.Namespace) -> list[NetworkInfo]:
-        print('Loading network list')
-        names = self.get_network_list()
-        try:
-            print('Loading network details')
-            networks = self.get_and_parse(names)
-            return networks
-        except Exception as e:
-            print('Error: ' + str(e) + ', falling back to individual parsing', file=sys.stderr)
-            print('Parsing networks individually')
-            networks = []
-            for name in names:
-                try:
-                    networks += self.get_and_parse([name])
-                except Exception as e:
-                    print('Error with \'' + name + '\': ' + str(e), file=sys.stderr)
-            return networks
+    def load(self) -> None:
+        print('Loading ' + str(self))
+        names = self.name_list()
+        print('Loading network details')
+        self.current = self.parse_network_list(names)
 
-    def add_network(self, n: NetworkInfo) -> None:
+    def install_network(self, n: NetworkInfo) -> None:
         args = [self.bin_path, 'connection', 'add',
             'type', 'wifi',
             'ifname', '*',
@@ -175,7 +218,46 @@ class Nmcli(NetworkInterface):
         result = Run(args, raise_on_fail=True)
         print('Network added:\n' + str(n))
 
-def get_system_interface() -> NetworkInterface:
+    def commit(self) -> None:
+        if len(self.pending) == 0:
+            print('No new networks to import into ' + str(self))
+            return
+        print(format_network_list('Networks to import into ' + str(self), self.pending))
+        for network in self.pending:
+            self.install_network(network)
+        self.pending = []
+        self.current = None
+
+class JsonFile(NetworkInterface):
+    def __init__(self, path: str):
+        super().__init__()
+        self.path = path
+
+    def __str__(self) -> str:
+        return self.path
+
+    def load(self) -> None:
+        print('Loading JSON from', self.path)
+        with open(self.path, "r") as f:
+            contents = f.read()
+        loaded = json.loads(contents)
+        assert isinstance(loaded, list), self.path + ' does not contain a list'
+        self.current = [NetworkInfo.parse(item) for item in loaded]
+
+    def commit(self) -> None:
+        if len(self.pending) == 0:
+            print('No new networks to export to ' + str(self))
+            return
+        print(format_network_list('Networks to export to ' + str(self), self.pending))
+        print('Saving JSON to', self.path)
+        output = [network.to_dict() for network in self.current + self.pending]
+        contents = json.dumps(output, indent=2)
+        with open(self.path, "w") as f:
+            f.write(contents)
+        self.pending = []
+        self.current = None
+
+def make_system_interface(args: argparse.Namespace) -> NetworkInterface:
     errors = []
     for interface in [Nmcli]:
         try:
@@ -184,109 +266,45 @@ def get_system_interface() -> NetworkInterface:
             errors.append(str(e))
     raise RuntimeError('\n  '.join(['No usable system interfaces detected:'] + errors))
 
-def get_new(old_list: list[NetworkInfo], new_list: list[NetworkInfo]):
-    old_dict = {}
-    for i in old_list:
-        old_dict[i.ssid] = True
-    ret = []
-    for i in new_list:
-        if i.ssid not in old_dict:
-            ret.append(i)
-    return ret
-
-def json_get_networks(args: argparse.Namespace) -> list[NetworkInfo]:
+def make_config_interface(args: argparse.Namespace) -> NetworkInterface:
     path = default_json_path
-    if args.file != None:
-        path = args.file
-    print('Loading ' + path)
-    contents = '[]'
-    try:
-        contents = open(path, "r").read()
-    except FileNotFoundError:
-        print('File ' + path + ' not found, not reading', file=sys.stderr)
-    print('Decoding JSON')
-    loaded = json.loads(contents)
-    assert isinstance(loaded, list), path + ' does not contain a list'
-    networks = [NetworkInfo.parse(item) for item in loaded]
-    return networks
-
-def json_save_networks(args: argparse.Namespace, data: list[NetworkInfo]) -> None:
-    path = default_json_path
-    if args.file != None:
+    if args.file is not None:
         path = args.file
     if path == default_json_path:
         os.makedirs(os.path.dirname(default_json_path), exist_ok=True)
-    print('Saving to ' + path)
-    output = [info.to_dict() for info in data]
-    contents = json.dumps(output, indent=2)
-    try:
-        open(path, "w").write(contents)
-    except Exception as e:
-        print('Failed to write to ' + path + ' (' + str(e) + ')', file=sys.stderr)
+    return JsonFile(path)
 
-def show_importing(
-    saved: list[NetworkInfo],
-    current: list[NetworkInfo],
-    interface: NetworkInterface,
-    args: argparse.Namespace
-) -> None:
-    new = get_new(current, saved)
-    if new == []:
-        print('No new networks in JSON file')
-    else:
-        print('Networks to import:\n')
-        for i in new:
-            if len(new) < 7:
-                print(str(i))
-            else:
-                print('  ' + i.get('name', i['ssid']))
-        for i in new:
-            interface.add_network(i)
+def load_all(args: argparse.Namespace) -> Tuple[NetworkInterface, NetworkInterface]:
+    config = make_config_interface(args)
+    config.load()
+    system = make_system_interface(args)
+    system.load()
+    return config, system
 
-def show_exporting(
-    saved: list[NetworkInfo],
-    current: list[NetworkInfo],
-    args: argparse.Namespace
-) -> None:
-    new = get_new(saved, current)
-    if new == []:
-        print('No new networks on system')
-    else:
-        print('Networks to save:\n')
-        for i in new:
-            if len(new) < 7:
-                print(str(i))
-            else:
-                print('  ' + i.get('name', i['ssid']))
-        saved += new
-        json_save_networks(args, saved)
+def import_networks(args: argparse.Namespace):
+    config, system = load_all(args)
+    system.queue_all_networks(config.get_current())
+    system.commit()
 
-def import_networks(args: argparse.Namespace, interface: NetworkInterface):
-    j = json_get_networks(args)
-    c = interface.get_networks(args)
-    show_importing(j, c, interface, args)
+def export_networks(args: argparse.Namespace):
+    config, system = load_all(args)
+    config.queue_all_networks(system.get_current())
+    config.commit()
 
-def export_networks(args: argparse.Namespace, interface: NetworkInterface):
-    j = json_get_networks(args)
-    c = interface.get_networks(args)
-    show_exporting(j, c, args)
+def update_networks(args: argparse.Namespace):
+    config, system = load_all(args)
+    config.queue_all_networks(system.get_current())
+    config.commit()
+    config.load()
+    system.queue_all_networks(config.get_current())
+    system.commit()
 
-def update_networks(args: argparse.Namespace, interface: NetworkInterface):
-    j = json_get_networks(args)
-    c = interface.get_networks(args)
-    show_exporting(j, c, args)
-    j = json_get_networks(args)
-    show_importing(j, c, interface, args)
-
-def show_networks(args: argparse.Namespace, interface: NetworkInterface):
-    j = json_get_networks(args)
-    c = interface.get_networks(args)
-    print('New networks in JSON file:\n')
-    for i in get_new(c, j):
-        print(str(i))
-    print('New networks on system:\n')
-    for i in get_new(j, c):
-        print(str(i))
+def show_networks(args: argparse.Namespace):
+    config, system = load_all(args)
+    config.queue_all_networks(system.get_current())
+    system.queue_all_networks(config.get_current())
+    print(format_network_list('New networks from ' + str(config), system.pending))
+    print(format_network_list('New networks from ' + str(system), config.pending))
 
 def main() -> None:
     parser = argparse.ArgumentParser(description='Save and load WiFi networks and passwords to JSON')
@@ -294,22 +312,22 @@ def main() -> None:
     # subparsers.required = True
     # subparsers.dest = 'command'
 
-    parser_load = subparsers.add_parser('import', help='Import WiFi networks from a JSON file')
-    parser_load.set_defaults(func=import_networks)
-    parser_load.add_argument('-f', '--file', type=str, help='File to import networks from, default is ' + default_json_path)
+    subparser = subparsers.add_parser('import', help='Import WiFi networks from a JSON file')
+    subparser.set_defaults(func=import_networks)
+    subparser.add_argument('-f', '--file', type=str, help='File to import networks from, default is ' + default_json_path)
 
-    parser_load = subparsers.add_parser('export', help='Export WiFi networks to a JSON file')
-    parser_load.set_defaults(func=export_networks)
-    parser_load.add_argument('-f', '--file', type=str, help='File to export networks to, default is ' + default_json_path)
+    subparser = subparsers.add_parser('export', help='Export WiFi networks to a JSON file')
+    subparser.set_defaults(func=export_networks)
+    subparser.add_argument('-f', '--file', type=str, help='File to export networks to, default is ' + default_json_path)
 
-    parser_load = subparsers.add_parser('update', help='Import and export')
-    parser_load.set_defaults(func=update_networks)
-    parser_load.add_argument('-f', '--file', type=str, help='JSON file to use, default is ' + default_json_path)
+    subparser = subparsers.add_parser('update', help='Import and export')
+    subparser.set_defaults(func=update_networks)
+    subparser.add_argument('-f', '--file', type=str, help='JSON file to use, default is ' + default_json_path)
 
 
-    parser_load = subparsers.add_parser('show', help='Show all WiFi networks loaded from the JSON file and detected from system')
-    parser_load.set_defaults(func=show_networks)
-    parser_load.add_argument('-f', '--file', type=str, help='File to load networks from, default is ' + default_json_path)
+    subparser = subparsers.add_parser('show', help='Show all WiFi networks loaded from the JSON file and detected from system')
+    subparser.set_defaults(func=show_networks)
+    subparser.add_argument('-f', '--file', type=str, help='File to load networks from, default is ' + default_json_path)
 
     args = parser.parse_args()
 
@@ -317,8 +335,7 @@ def main() -> None:
         parser.print_help()
         exit(1)
 
-    interface = get_system_interface()
-    args.func(args, interface)
+    args.func(args)
 
 if __name__ == '__main__':
     main()
