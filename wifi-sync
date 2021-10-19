@@ -24,42 +24,64 @@ class Run:
             raise RuntimeError(
                 '`' + ' '.join(arg_list) + '` exited with code ' + str(self.exit_code) + ':\n' + self.stderr)
 
-NetworkInfo = dict[str, Any]
+class NetworkInfo:
+    def __init__(
+        self,
+        name: Optional[str],
+        ssid: str,
+        pswd_type: str,
+        pswd: Optional[str],
+        autoconnect: bool,
+    ):
+        # parse() takes values stright from JSON, so we check types here
+        assert name is None or isinstance(name, str), 'name has invalid type'
+        assert isinstance(ssid, str), 'ssid has invalid type'
+        assert isinstance(pswd_type, str), 'pswd_type has invalid type'
+        assert pswd is None or isinstance(pswd, str), 'pswd has invalid type'
+        assert isinstance(autoconnect, bool), 'autoconnect has invalid type'
+        if name is None:
+            name = ssid
+        self.name = name
+        self.ssid = ssid
+        if pswd_type == 'open':
+            assert pswd is None, 'Open networks can not have a password'
+        elif pswd_type == 'wpa':
+            pass
+        else:
+            raise AssertionError('Unknown password type \'' + pswd_type + '\'')
+        self.pswd_type = pswd_type
+        self.pswd = pswd
+        self.autoconnect = autoconnect
 
-def network_new(
-    name: str,
-    ssid: str,
-    pswd_type: str,
-    pswd: Optional[str] = None,
-    autoconnect=True
-) -> NetworkInfo:
-    assert ssid != None, 'SSID can not be None'
-    if name == None:
-        name = ssid
-    if pswd_type == 'open':
-        assert pswd == None, 'Open networks can not have a password'
-    elif pswd_type == 'wpa': # or pswd_type == 'wep':
-        #assert pswd != None, pswd_type + ' networks must have password'
-        pass
-    else:
-        raise AssertionError('Unknown password type \'' + pswd_type + '\'')
-    data: NetworkInfo = {}
-    data['name'] = name
-    data['ssid'] = ssid
-    data['pswd_type'] = pswd_type
-    if pswd is not None:
-        data['pswd'] = pswd
-    if autoconnect == False:
-        data['autoconnect'] = False
-    return data
+    @staticmethod
+    def parse(data: dict[str, Any]) -> NetworkInfo:
+        return NetworkInfo(
+            data.get('name'),
+            data['ssid'],
+            data['pswd_type'],
+            data.get('pswd'),
+            data.get('autoconnect', True),
+        );
 
-def network_to_str(data: NetworkInfo) -> str:
-    return (
-        '| name: ' + data['name'] + '\n' +
-        '| SSID: ' + data['ssid'] + '\n' +
-        '| type: ' + data['pswd_type'] + '\n' +
-        ('' if 'pswd' not in data else '| password: ' + data['pswd'] + '\n') +
-        ('' if data.get('autoconnect', True) else '| autoconnect disabled\n'))
+    def to_dict(self) -> dict[str, Any]:
+        '''For encoding to JSON'''
+        data: dict[str, Any] = {}
+        data['name'] = self.name
+        data['ssid'] = self.ssid
+        data['pswd_type'] = self.pswd_type
+        if self.pswd is not None:
+            data['pswd'] = self.pswd
+        if not self.autoconnect:
+            data['autoconnect'] = False
+        return data
+
+    def __str__(self) -> str:
+        return (
+            '| name: ' + self.name + '\n' +
+            '| SSID: ' + self.ssid + '\n' +
+            '| type: ' + self.pswd_type + '\n' +
+            ('' if self.pswd is None else '| password: ' + self.pswd + '\n') +
+            ('' if self.autoconnect else '| autoconnect disabled\n'))
 
 class NetworkInterface:
     def get_networks(self, args: argparse.Namespace) -> list[NetworkInfo]:
@@ -100,7 +122,7 @@ class Nmcli(NetworkInterface):
         else:
             raise AssertionError('Unknown key management: ' + ' '.join(key_mgmts))
         autoconnect = len(autoconnect_nos) == 0
-        return network_new(name, ssids[0], pswd_type, psk, autoconnect)
+        return NetworkInfo(name, ssids[0], pswd_type, psk, autoconnect)
 
     def get_and_parse(self, names: list[str]) -> list[NetworkInfo]:
         out = Run([self.bin_path, '--show-secrets', 'connection', 'show'] + names, raise_on_fail=True)
@@ -136,23 +158,22 @@ class Nmcli(NetworkInterface):
         args = [self.bin_path, 'connection', 'add',
             'type', 'wifi',
             'ifname', '*',
-            'con-name', n['name'],
-            'ssid', n['ssid'],
+            'con-name', n.name,
+            'ssid', n.ssid,
             'save', 'yes',
-            'autoconnect', 'yes' if n.get('autoconnect', True) else 'no']
-        pswd_type = n.get('pswd_type', 'NO_PSWD_TYPE_SPECIFIED')
-        if pswd_type == 'open':
+            'autoconnect', 'yes' if n.autoconnect else 'no']
+        if n.pswd_type == 'open':
             pass
-        elif pswd_type == 'wpa':
+        elif n.pswd_type == 'wpa':
             args += ['802-11-wireless-security.key-mgmt', 'wpa-psk']
-            if 'pswd' in n:
-                args += ['802-11-wireless-security.psk', n['pswd']]
-        elif pswd_type == 'wep':
+            if n.pswd is not None:
+                args += ['802-11-wireless-security.psk', n.pswd]
+        elif n.pswd_type == 'wep':
             raise AssertionError('WEP not yet supported')
         else:
-            raise AssertionError('unknown type: ' + pswd_type)
+            raise AssertionError('unknown type: ' + n.pswd_type)
         result = Run(args, raise_on_fail=True)
-        print('Network added:\n' + network_to_str(n))
+        print('Network added:\n' + str(n))
 
 def get_system_interface() -> NetworkInterface:
     errors = []
@@ -166,10 +187,10 @@ def get_system_interface() -> NetworkInterface:
 def get_new(old_list: list[NetworkInfo], new_list: list[NetworkInfo]):
     old_dict = {}
     for i in old_list:
-        old_dict[i['ssid']] = True
+        old_dict[i.ssid] = True
     ret = []
     for i in new_list:
-        if i['ssid'] not in old_dict:
+        if i.ssid not in old_dict:
             ret.append(i)
     return ret
 
@@ -184,8 +205,10 @@ def json_get_networks(args: argparse.Namespace) -> list[NetworkInfo]:
     except FileNotFoundError:
         print('File ' + path + ' not found, not reading', file=sys.stderr)
     print('Decoding JSON')
-    ret = json.loads(contents)
-    return ret
+    loaded = json.loads(contents)
+    assert isinstance(loaded, list), path + ' does not contain a list'
+    networks = [NetworkInfo.parse(item) for item in loaded]
+    return networks
 
 def json_save_networks(args: argparse.Namespace, data: list[NetworkInfo]) -> None:
     path = default_json_path
@@ -194,7 +217,8 @@ def json_save_networks(args: argparse.Namespace, data: list[NetworkInfo]) -> Non
     if path == default_json_path:
         os.makedirs(os.path.dirname(default_json_path), exist_ok=True)
     print('Saving to ' + path)
-    contents = json.dumps(data, indent=2)
+    output = [info.to_dict() for info in data]
+    contents = json.dumps(output, indent=2)
     try:
         open(path, "w").write(contents)
     except Exception as e:
@@ -213,7 +237,7 @@ def show_importing(
         print('Networks to import:\n')
         for i in new:
             if len(new) < 7:
-                print(network_to_str(i))
+                print(str(i))
             else:
                 print('  ' + i.get('name', i['ssid']))
         for i in new:
@@ -231,7 +255,7 @@ def show_exporting(
         print('Networks to save:\n')
         for i in new:
             if len(new) < 7:
-                print(network_to_str(i))
+                print(str(i))
             else:
                 print('  ' + i.get('name', i['ssid']))
         saved += new
@@ -259,10 +283,10 @@ def show_networks(args: argparse.Namespace, interface: NetworkInterface):
     c = interface.get_networks(args)
     print('New networks in JSON file:\n')
     for i in get_new(c, j):
-        print(network_to_str(i))
+        print(str(i))
     print('New networks on system:\n')
     for i in get_new(j, c):
-        print(network_to_str(i))
+        print(str(i))
 
 def main() -> None:
     parser = argparse.ArgumentParser(description='Save and load WiFi networks and passwords to JSON')
