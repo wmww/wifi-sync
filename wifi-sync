@@ -4,10 +4,12 @@
 
 import sys
 import os
+import math
 import subprocess
 import re
 import json
 import argparse
+from datetime import datetime
 from typing import Optional, Any, Tuple
 
 default_json_path = os.path.expanduser('~') + '/.config/wifi-sync/networks.json'
@@ -29,9 +31,11 @@ class NetworkInfo:
         self,
         name: Optional[str],
         ssid: str,
+        nm_uuid: Optional[str],
         pswd_type: str,
         pswd: Optional[str],
         autoconnect: bool,
+        created_at: Optional[float],
     ):
         # parse() takes values stright from JSON, so we check types here
         assert name is None or isinstance(name, str), 'name has invalid type'
@@ -39,6 +43,7 @@ class NetworkInfo:
         assert isinstance(pswd_type, str), 'pswd_type has invalid type'
         assert pswd is None or isinstance(pswd, str), 'pswd has invalid type'
         assert isinstance(autoconnect, bool), 'autoconnect has invalid type'
+        assert created_at is None or isinstance(created_at, float), 'created_at has invalid type'
         if name is None:
             name = ssid
         self.name: str = name
@@ -49,18 +54,22 @@ class NetworkInfo:
             pass
         else:
             raise AssertionError('Unknown password type \'' + pswd_type + '\'')
+        self.nm_uuid = nm_uuid
         self.pswd_type: str = pswd_type
         self.pswd: Optional[str] = pswd
         self.autoconnect: bool = autoconnect
+        self.created_at: Optional[float] = created_at
 
     @staticmethod
     def parse(data: dict[str, Any]) -> 'NetworkInfo':
         return NetworkInfo(
             data.get('name'),
             data['ssid'],
+            None,
             data['pswd_type'],
             data.get('pswd'),
             data.get('autoconnect', True),
+            data.get('created_at', None),
         );
 
     def to_dict(self) -> dict[str, Any]:
@@ -73,6 +82,11 @@ class NetworkInfo:
             data['pswd'] = self.pswd
         if not self.autoconnect:
             data['autoconnect'] = False
+        if self.created_at is not None:
+            data['created_at'] = self.created_at
+            data['readable_time'] = datetime.utcfromtimestamp(self.created_at).strftime(
+                "%b %d, %Y %H:%M UTC"
+            )
         return data
 
     def __str__(self) -> str:
@@ -89,15 +103,20 @@ def format_network_list(title: str, networks: list[NetworkInfo]) -> str:
         if len(networks) < 7:
             result += str(network) + '\n'
         else:
-            result += '  ' + network.name + '\n'
+            result += '  ' + network.name + ' (' + network.ssid + ')' + '\n'
     return result
 
 class NetworkInterface:
     def __init__(self):
         self.current: Optional[List[NetworkInfo]] = None
-        self.pending: List[NetworkInfo] = []
+        self.pending_remove: List[NetworkInfo] = []
+        self.pending_add: List[NetworkInfo] = []
 
     def __str__(self) -> str:
+        raise NotImplementedError()
+
+    def match(self, a: NetworkInfo, b: NetworkInfo) -> bool:
+        '''Returns if two networks are equal in terms of what this interface cares about'''
         raise NotImplementedError()
 
     def load(self) -> None:
@@ -114,14 +133,18 @@ class NetworkInterface:
 
     def queue_network(self, network: NetworkInfo) -> None:
         '''Puts the network in pending if it's not already known'''
-        for known in self.get_current() + self.pending:
+        to_remove: list[NetworkInfo] = []
+        for known in self.get_current() + self.pending_add:
             if known.ssid == network.ssid:
-                return
-        print(network.ssid, 'is not in', ' '.join([a.ssid for a in self.get_current()]))
-        self.pending.append(network)
+                if self.match(known, network):
+                    return
+                else:
+                    to_remove.append(known)
+        self.pending_remove += to_remove
+        self.pending_add.append(network)
 
     def queue_all_networks(self, networks: list[NetworkInfo]) -> None:
-        '''Puts any new networks in pending'''
+        '''Puts any new networks in pending_add'''
         for network in networks:
             self.queue_network(network)
 
@@ -130,8 +153,10 @@ class Nmcli(NetworkInterface):
     def __init__(self):
         super().__init__()
         self.bin_path = '/usr/bin/nmcli'
+        self.data_path = '/etc/NetworkManager/system-connections'
         Run([self.bin_path, '-v'], raise_on_fail=True)
         self.conn_id_re = re.compile(r'^connection\.id:\s*(.*)$', flags=re.MULTILINE)
+        self.conn_uuid_re = re.compile(r'^connection\.uuid:\s*(.*)$', flags=re.MULTILINE)
         self.conn_type_re = re.compile(r'^connection\.type:\s*(.*)$', flags=re.MULTILINE)
         self.ssid_re = re.compile(r'^802-11-wireless\.ssid:\s*(.*)$', flags=re.MULTILINE)
         self.psk_re = re.compile(r'^802-11-wireless-security\.psk:\s*(.*)$', flags=re.MULTILINE)
@@ -141,10 +166,35 @@ class Nmcli(NetworkInterface):
     def __str__(self) -> str:
         return 'NetworkManager'
 
+    def match(self, a: NetworkInfo, b: NetworkInfo) -> bool:
+        return (
+            a.ssid == b.ssid and
+            a.pswd_type == b.pswd_type and
+            a.pswd == b.pswd and
+            a.autoconnect == b.autoconnect
+        )
+
     def name_list(self) -> list[str]:
         out = Run([self.bin_path, '-f', 'NAME', 'connection'], raise_on_fail=True)
         networks = [i.strip() for i in out.stdout.strip().split('\n')[1:]] # cut off "NAME" header
         return list(set(networks))
+
+    def get_created_at(self, name: str, uuid: str) -> float:
+        paths = [
+            os.path.join(self.data_path, name + '-' + uuid + '.nmconnection'),
+            os.path.join(self.data_path, name + '-' + uuid),
+            os.path.join(self.data_path, name + '.nmconnection'),
+            os.path.join(self.data_path, name),
+        ]
+        time = math.inf
+        for path in paths:
+            try:
+                time = min(time, os.path.getmtime(path))
+            except FileNotFoundError:
+                pass
+        # If we're before 2000 or after 2050, something is wrong
+        assert time > 946684800.0 and time < 2524608000.0, 'Invalid time ' + str(time)
+        return time
 
     def parse_single_network(self, data: str) -> Optional[NetworkInfo]:
         conn_types = self.conn_type_re.findall(data)
@@ -156,11 +206,13 @@ class Nmcli(NetworkInterface):
         else:
             raise AssertionError('Invalid connection type ' + conn_types[0])
         conn_ids = self.conn_id_re.findall(data)
+        conn_uuids = self.conn_uuid_re.findall(data)
         ssids = self.ssid_re.findall(data)
         psks = self.psk_re.findall(data)
         key_mgmts = self.key_mgmt_re.findall(data)
         autoconnect_nos = self.autoconnect_no_re.findall(data)
         assert len(conn_ids) == 1, 'Could not properly detect connection ID'
+        assert len(conn_uuids) == 1, 'Could not properly detect connection UUID'
         assert len(ssids) == 1, 'Could not properly detect SSID'
         assert len(psks) <= 1, 'Found more then one password'
         assert len(key_mgmts) <= 1, 'Found more then one key management:\n'
@@ -179,7 +231,8 @@ class Nmcli(NetworkInterface):
         else:
             raise AssertionError('Unknown key management: ' + ' '.join(key_mgmts))
         autoconnect = len(autoconnect_nos) == 0
-        return NetworkInfo(conn_ids[0], ssids[0], pswd_type, psk, autoconnect)
+        created_at = self.get_created_at(conn_ids[0], conn_uuids[0])
+        return NetworkInfo(conn_ids[0], ssids[0], conn_uuids[0], pswd_type, psk, autoconnect, created_at)
 
     def parse_network_list(self, names: list[str]) -> list[NetworkInfo]:
         out = Run([self.bin_path, '--show-secrets', 'connection', 'show'] + names, raise_on_fail=True)
@@ -218,14 +271,21 @@ class Nmcli(NetworkInterface):
         result = Run(args, raise_on_fail=True)
         print('Network added:\n' + str(n))
 
+    def delete_network(self, n: NetworkInfo) -> None:
+        print('remove_network() not implemented for ' + str(self))
+
     def commit(self) -> None:
-        if len(self.pending) == 0:
+        if len(self.pending_add) == 0 and len(self.pending_remove):
             print('No new networks to import into ' + str(self))
             return
-        print(format_network_list('Networks to import into ' + str(self), self.pending))
-        for network in self.pending:
+        print(format_network_list('Networks to delete from ' + str(self), self.pending_remove))
+        print(format_network_list('Networks to import into ' + str(self), self.pending_add))
+        for network in self.pending_remove:
+            self.delete_network(network)
+        for network in self.pending_add:
             self.install_network(network)
-        self.pending = []
+        self.pending_add = []
+        self.pending_remove = []
         self.current = None
 
 class JsonFile(NetworkInterface):
@@ -236,6 +296,23 @@ class JsonFile(NetworkInterface):
     def __str__(self) -> str:
         return self.path
 
+    def match(self, a: NetworkInfo, b: NetworkInfo) -> bool:
+        created_at_eq = (
+            (a.created_at is None and
+             b.created_at is None) or
+            (a.created_at is not None and
+             b.created_at is not None and
+             abs(a.created_at - b.created_at) > 1)
+        )
+        return (
+            a.name == b.name and
+            a.ssid == b.ssid and
+            a.pswd_type == b.pswd_type and
+            a.pswd == b.pswd and
+            a.autoconnect == b.autoconnect and
+            created_at_eq
+        )
+
     def load(self) -> None:
         print('Loading JSON from', self.path)
         with open(self.path, "r") as f:
@@ -245,16 +322,22 @@ class JsonFile(NetworkInterface):
         self.current = [NetworkInfo.parse(item) for item in loaded]
 
     def commit(self) -> None:
-        if len(self.pending) == 0:
+        if len(self.pending_add) == 0 and len(self.pending_remove) == 0:
             print('No new networks to export to ' + str(self))
             return
-        print(format_network_list('Networks to export to ' + str(self), self.pending))
+        print(format_network_list('Networks to delete from ' + str(self), self.pending_remove))
+        print(format_network_list('Networks to export to ' + str(self), self.pending_add))
         print('Saving JSON to', self.path)
-        output = [network.to_dict() for network in self.current + self.pending]
+        output = [
+            network.to_dict()
+            for network in self.current + self.pending_add
+            if network not in self.pending_remove
+        ]
         contents = json.dumps(output, indent=2)
         with open(self.path, "w") as f:
             f.write(contents)
-        self.pending = []
+        self.pending_add = []
+        self.pending_remove = []
         self.current = None
 
 def make_system_interface(args: argparse.Namespace) -> NetworkInterface:
@@ -303,8 +386,8 @@ def show_networks(args: argparse.Namespace):
     config, system = load_all(args)
     config.queue_all_networks(system.get_current())
     system.queue_all_networks(config.get_current())
-    print(format_network_list('New networks from ' + str(config), system.pending))
-    print(format_network_list('New networks from ' + str(system), config.pending))
+    print(format_network_list('New networks from ' + str(config), system.pending_add))
+    print(format_network_list('New networks from ' + str(system), config.pending_add))
 
 def main() -> None:
     parser = argparse.ArgumentParser(description='Save and load WiFi networks and passwords to JSON')
