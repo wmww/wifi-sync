@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Optional, Any, Tuple
 
 default_json_path = os.path.expanduser('~') + '/.config/wifi-sync/networks.json'
+ignore_conn_types = ['802-3-ethernet', 'bridge', 'tun']
 
 class Run:
     def __init__(self, arg_list: list[str], raise_on_fail=False):
@@ -218,8 +219,15 @@ class Nmcli(NetworkInterface):
                 break
             except FileNotFoundError:
                 pass
+            except PermissionError as e:
+                raise RuntimeError(
+                    str(e) + '\nyou may want to run:\n' +
+                    'sudo chmod o+x ' + self.data_path
+                )
         # If we're before 2000 or after 2050, something is wrong
-        assert time > 946684800.0 and time < 2524608000.0, 'Invalid time ' + str(time)
+        assert time > 946684800.0 and time < 2524608000.0, (
+            'Invalid time ' + str(time) + ' for network ' + name
+        )
         return time
 
     def parse_single_network(self, data: str) -> Optional[NetworkInfo]:
@@ -227,7 +235,7 @@ class Nmcli(NetworkInterface):
         assert len(conn_types) == 1, 'Could not properly detect connection type'
         if conn_types[0] == '802-11-wireless':
             pass
-        elif conn_types[0] == '802-3-ethernet' or conn_types[0] == 'bridge':
+        elif conn_types[0] in ignore_conn_types:
             return None
         else:
             raise AssertionError('Invalid connection type ' + conn_types[0])
