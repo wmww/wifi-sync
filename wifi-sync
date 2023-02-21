@@ -35,6 +35,7 @@ class NetworkInfo:
         pswd: Optional[str],
         autoconnect: bool,
         created_at: Optional[float],
+        last_seen_at: Optional[float],
     ):
         # parse() takes values stright from JSON, so we check types here
         assert name is None or isinstance(name, str), 'name has invalid type'
@@ -43,6 +44,7 @@ class NetworkInfo:
         assert pswd is None or isinstance(pswd, str), 'pswd has invalid type'
         assert isinstance(autoconnect, bool), 'autoconnect has invalid type'
         assert created_at is None or isinstance(created_at, float), 'created_at has invalid type'
+        assert last_seen_at is None or isinstance(last_seen_at, float), 'last_seen_at has invalid type'
         if name is None:
             name = ssid
         self.name: str = name
@@ -58,6 +60,7 @@ class NetworkInfo:
         self.pswd: Optional[str] = pswd
         self.autoconnect: bool = autoconnect
         self.created_at: Optional[float] = created_at
+        self.last_seen_at: Optional[float] = last_seen_at
 
     @staticmethod
     def parse(data: dict[str, Any]) -> 'NetworkInfo':
@@ -69,6 +72,7 @@ class NetworkInfo:
             data.get('pswd'),
             data.get('autoconnect', True),
             data.get('created_at', None),
+            data.get('last_seen_at', None),
         );
 
     def human_readable_created_at(self) -> str:
@@ -76,6 +80,12 @@ class NetworkInfo:
             return 'unknown'
         else:
             return datetime.utcfromtimestamp(self.created_at).strftime('%b %d, %Y %H:%M UTC')
+
+    def human_readable_last_seen_at(self) -> str:
+        if self.last_seen_at is None:
+            return 'unknown'
+        else:
+            return datetime.utcfromtimestamp(self.last_seen_at).strftime('%b %d, %Y %H:%M UTC')
 
     def to_dict(self) -> dict[str, Any]:
         '''For encoding to JSON'''
@@ -89,11 +99,17 @@ class NetworkInfo:
             data['autoconnect'] = False
         if self.created_at is not None:
             data['created_at'] = self.created_at
-            data['readable_time'] = self.human_readable_created_at()
+            data['readable_created_at'] = self.human_readable_created_at()
+        if self.last_seen_at is not None:
+            data['last_seen_at'] = self.last_seen_at
+            data['readable_last_seen_at'] = self.human_readable_last_seen_at()
         return data
 
     def created_at_or(self, default: float) -> float:
         return self.created_at if self.created_at is not None else default
+
+    def last_seen_at_or(self, default: float) -> float:
+        return self.last_seen_at if self.last_seen_at is not None else default
 
     def __str__(self) -> str:
         return (
@@ -103,6 +119,7 @@ class NetworkInfo:
             ('' if self.pswd is None else '| password: ' + self.pswd + '\n') +
             ('' if self.autoconnect else '| autoconnect disabled\n') +
             '| created at: ' + self.human_readable_created_at() + '\n'
+            '| last seen at: ' + self.human_readable_last_seen_at() + '\n'
         )
 
 def format_network_list(title: str, networks: list[NetworkInfo]) -> str:
@@ -181,6 +198,7 @@ class Nmcli(NetworkInterface):
         self.conn_id_re = re.compile(r'^connection\.id:\s*(.*)$', flags=re.MULTILINE)
         self.conn_uuid_re = re.compile(r'^connection\.uuid:\s*(.*)$', flags=re.MULTILINE)
         self.conn_type_re = re.compile(r'^connection\.type:\s*(.*)$', flags=re.MULTILINE)
+        self.last_seen_at_re = re.compile(r'^connection\.timestamp:\s*(.*)$', flags=re.MULTILINE)
         self.ssid_re = re.compile(r'^802-11-wireless\.ssid:\s*(.*)$', flags=re.MULTILINE)
         self.psk_re = re.compile(r'^802-11-wireless-security\.psk:\s*(.*)$', flags=re.MULTILINE)
         self.key_mgmt_re = re.compile(r'^802-11-wireless-security\.key-mgmt:\s*(.*)$', flags=re.MULTILINE)
@@ -241,12 +259,14 @@ class Nmcli(NetworkInterface):
             raise AssertionError('Invalid connection type ' + conn_types[0])
         conn_ids = self.conn_id_re.findall(data)
         conn_uuids = self.conn_uuid_re.findall(data)
+        last_seen_at_timestamps = self.last_seen_at_re.findall(data)
         ssids = self.ssid_re.findall(data)
         psks = self.psk_re.findall(data)
         key_mgmts = self.key_mgmt_re.findall(data)
         autoconnect_nos = self.autoconnect_no_re.findall(data)
         assert len(conn_ids) == 1, 'Could not properly detect connection ID'
         assert len(conn_uuids) == 1, 'Could not properly detect connection UUID'
+        assert len(last_seen_at_timestamps) == 1, 'Could not properly detect last seen at timestamp'
         assert len(ssids) == 1, 'Could not properly detect SSID'
         assert len(psks) <= 1, 'Found more then one password'
         assert len(key_mgmts) <= 1, 'Found more then one key management:\n'
@@ -266,7 +286,8 @@ class Nmcli(NetworkInterface):
             raise AssertionError('Unknown key management: ' + ' '.join(key_mgmts))
         autoconnect = len(autoconnect_nos) == 0
         created_at = self.get_created_at(conn_ids[0], conn_uuids[0])
-        return NetworkInfo(conn_ids[0], ssids[0], conn_uuids[0], pswd_type, psk, autoconnect, created_at)
+        last_seen_at = float(last_seen_at_timestamps[0])
+        return NetworkInfo(conn_ids[0], ssids[0], conn_uuids[0], pswd_type, psk, autoconnect, created_at, last_seen_at)
 
     def parse_network_list(self, names: list[str]) -> list[NetworkInfo]:
         out = Run([self.bin_path, '--show-secrets', 'connection', 'show'] + names, raise_on_fail=True)
@@ -340,11 +361,13 @@ class JsonFile(NetworkInterface):
             old.pswd_type == new.pswd_type and
             old.pswd == new.pswd and
             old.autoconnect == new.autoconnect and
-            old.created_at_or(math.inf) - 200 < new.created_at_or(0) # JSON only saves with minute precision
+            old.created_at_or(math.inf) - 200 < new.created_at_or(0) and # JSON only saves with minute precision
+            old.last_seen_at_or(0) + 200 > new.last_seen_at_or(math.inf) # JSON only saves with minute precision
         ):
             return old
         else:
             new.created_at = min(new.created_at_or(math.inf), old.created_at_or(math.inf))
+            new.last_seen_at = max(new.last_seen_at_or(0), new.last_seen_at_or(0))
             return new
 
 
