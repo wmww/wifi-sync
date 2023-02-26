@@ -40,6 +40,7 @@ def is_valid_time(time: float) -> bool:
 class NetworkInfo:
     def __init__(
         self,
+        sync: bool,
         name: Optional[str],
         ssid: str,
         nm_uuid: Optional[str],
@@ -52,6 +53,7 @@ class NetworkInfo:
         comment: Optional[str],
     ):
         # parse() takes values stright from JSON, so we check types here
+        assert isinstance(sync, bool), 'sync has invalid type'
         assert name is None or isinstance(name, str), 'name has invalid type'
         assert isinstance(ssid, str), 'ssid has invalid type'
         assert isinstance(pswd_type, str), 'pswd_type has invalid type'
@@ -61,6 +63,7 @@ class NetworkInfo:
         assert created_at is None or is_valid_time(created_at), 'created_at is invalid'
         assert last_seen_at is None or is_valid_time(last_seen_at), 'last_seen_at is invalid'
         assert comment is None or isinstance(comment, str), 'comment has invalid type'
+        self.sync = sync
         if name is None:
             name = ssid
         self.name: str = name
@@ -76,13 +79,14 @@ class NetworkInfo:
         self.pswd: Optional[str] = pswd
         self.autoconnect: bool = autoconnect
         self.source = source
-        self.created_at: Optional[float] = created_at
+        self.created_at: float = created_at
         self.last_seen_at: Optional[float] = last_seen_at
         self.comment = comment
 
     @staticmethod
     def parse(data: dict[str, Any]) -> 'NetworkInfo':
         return NetworkInfo(
+            data.get('sync', True),
             data.get('name'),
             data['ssid'],
             None,
@@ -110,6 +114,8 @@ class NetworkInfo:
     def to_dict(self) -> dict[str, Any]:
         '''For encoding to JSON'''
         data: dict[str, Any] = {}
+        if not self.sync:
+            data['sync'] = self.sync
         data['name'] = self.name
         data['ssid'] = self.ssid
         data['pswd_type'] = self.pswd_type
@@ -128,14 +134,12 @@ class NetworkInfo:
             data['comment'] = self.comment
         return data
 
-    def created_at_or(self, default: float) -> float:
-        return self.created_at if self.created_at is not None else default
-
     def last_seen_at_or(self, default: float) -> float:
         return self.last_seen_at if self.last_seen_at is not None else default
 
     def __str__(self) -> str:
         return (
+            ('' if self.sync else '| not synced\n') +
             '| name: ' + self.name + '\n' +
             '| SSID: ' + self.ssid + '\n' +
             '| type: ' + self.pswd_type + '\n' +
@@ -198,6 +202,8 @@ class NetworkInterface:
                         self.pending_remove.append(remove)
 
     def queue_network(self, network: NetworkInfo) -> None:
+        if not network.sync:
+            return
         '''Puts the network in pending if it's not already known'''
         to_remove: list[NetworkInfo] = []
         for known in self.get_current() + self.pending_add:
@@ -217,7 +223,7 @@ class NetworkInterface:
             self.queue_network(network)
 
 class Nmcli(NetworkInterface):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.bin_path = '/usr/bin/nmcli'
         self.data_path = '/etc/NetworkManager/system-connections'
@@ -317,6 +323,7 @@ class Nmcli(NetworkInterface):
         if is_valid_time(last_seen_at_or_0):
             last_seen_at = last_seen_at_or_0
         return NetworkInfo(
+            True,
             conn_ids[0],
             ssids[0],
             conn_uuids[0],
@@ -382,7 +389,7 @@ class Nmcli(NetworkInterface):
         self.current = None
 
 class JsonFile(NetworkInterface):
-    def __init__(self, path: str):
+    def __init__(self, path: str) -> None:
         super().__init__()
         self.path = path
 
@@ -397,14 +404,12 @@ class JsonFile(NetworkInterface):
             new.last_seen_at = old.last_seen_at
         if new.comment is None:
             new.comment = old.comment
-
         if (
             old.name == new.name and
             old.ssid == new.ssid and
             old.pswd_type == new.pswd_type and
             old.pswd == new.pswd and
             old.autoconnect == new.autoconnect and
-            old.source == new.source and
             new.created_at == old.created_at and
             new.last_seen_at == new.last_seen_at and
             old.comment == new.comment
