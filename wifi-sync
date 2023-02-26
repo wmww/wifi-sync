@@ -428,7 +428,7 @@ class Android(NetworkInterface):
 
     def run_on_android(self, arg_list: list[str], raise_on_fail=False) -> Run:
         if self.running_on_device:
-            return Run(arg_list, raise_on_fail=raise_on_fail)
+            return Run(['sudo'] + arg_list, raise_on_fail=raise_on_fail)
         else:
             return Run(['adb', 'shell'] + escape_shell(arg_list), raise_on_fail=raise_on_fail)
 
