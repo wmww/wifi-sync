@@ -7,6 +7,7 @@ import subprocess
 import re
 import json
 import argparse
+import time
 from datetime import datetime
 from typing import Optional, Any, Tuple
 
@@ -52,6 +53,8 @@ class NetworkInfo:
         last_seen_at: Optional[float],
         comment: Optional[str],
     ):
+        if created_at is None:
+            created_at = time.time()
         # parse() takes values stright from JSON, so we check types here
         assert isinstance(sync, bool), 'sync has invalid type'
         assert name is None or isinstance(name, str), 'name has invalid type'
@@ -60,7 +63,7 @@ class NetworkInfo:
         assert pswd is None or isinstance(pswd, str), 'pswd has invalid type'
         assert isinstance(autoconnect, bool), 'autoconnect has invalid type'
         assert isinstance(source, str), 'source has invalid type'
-        assert created_at is None or is_valid_time(created_at), 'created_at is invalid'
+        assert is_valid_time(created_at), 'created_at is invalid'
         assert last_seen_at is None or is_valid_time(last_seen_at), 'last_seen_at is invalid'
         assert comment is None or isinstance(comment, str), 'comment has invalid type'
         self.sync = sync
@@ -100,10 +103,7 @@ class NetworkInfo:
         );
 
     def human_readable_created_at(self) -> str:
-        if self.created_at is None:
-            return 'unknown'
-        else:
-            return datetime.utcfromtimestamp(self.created_at).strftime('%b %d, %Y %H:%M UTC')
+        return datetime.utcfromtimestamp(self.created_at).strftime('%b %d, %Y %H:%M UTC')
 
     def human_readable_last_seen_at(self) -> str:
         if self.last_seen_at is None:
@@ -124,9 +124,8 @@ class NetworkInfo:
         if not self.autoconnect:
             data['autoconnect'] = False
         data['source'] = self.source
-        if self.created_at is not None:
-            data['created_at'] = self.created_at
-            data['readable_created_at'] = self.human_readable_created_at()
+        data['created_at'] = self.created_at
+        data['readable_created_at'] = self.human_readable_created_at()
         if self.last_seen_at is not None:
             data['last_seen_at'] = self.last_seen_at
             data['readable_last_seen_at'] = self.human_readable_last_seen_at()
@@ -194,7 +193,7 @@ class NetworkInterface:
             for other in self.get_current():
                 if network != other and network.ssid == other.ssid:
                     # Keep the oldest one
-                    if network.created_at_or(math.inf) < other.created_at_or(math.inf):
+                    if network.created_at < other.created_at:
                         keep, remove = network, other
                     else:
                         keep, remove = other, network
@@ -398,7 +397,7 @@ class JsonFile(NetworkInterface):
 
     def with_update_applied(self, old: NetworkInfo, new: NetworkInfo) -> Optional[NetworkInfo]:
         # JSON only saves with ~minute precision, so consider equal unless it's more than 200 seconds older
-        if new.created_at is None or (old.created_at is not None and new.created_at - 200 > old.created_at):
+        if new.created_at - 200 > old.created_at:
             new.created_at = old.created_at
         if new.last_seen_at is None or (old.last_seen_at is not None and new.last_seen_at + 200 < old.last_seen_at):
             new.last_seen_at = old.last_seen_at
@@ -431,7 +430,7 @@ class JsonFile(NetworkInterface):
             return
         print('Saving JSON to', self.path)
         output = [network for network in self.get_current() if network not in self.pending_remove] + self.pending_add
-        output.sort(key=lambda network: network.created_at_or(0))
+        output.sort(key=lambda network: network.created_at)
         contents = json.dumps([network.to_dict() for network in output], indent=2)
         with open(self.path, "w") as f:
             f.write(contents)
