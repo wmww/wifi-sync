@@ -444,8 +444,6 @@ class Android(NetworkInterface):
         ):
             return None
         else:
-            if old.ssid == 'pollyblossom':
-                print('old: ' + str(old) + '\n\nnew: ' + str(new))
             return new
 
     def load(self) -> None:
