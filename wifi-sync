@@ -2,13 +2,16 @@
 
 import sys
 import os
+import platform
 import math
 import subprocess
+import socket
 import re
 import json
 import argparse
 import time
 from datetime import datetime
+import xml.etree.ElementTree as ET
 from typing import Optional, Any, Tuple
 
 default_json_path = os.path.expanduser('~') + '/.config/wifi-sync/networks.json'
@@ -33,6 +36,12 @@ class Run:
         if raise_on_fail and self.exit_code != 0:
             raise RuntimeError(
                 '`' + ' '.join(arg_list) + '` exited with code ' + str(self.exit_code) + ':\n' + self.stderr)
+
+def is_android() -> bool:
+    return hasattr(sys, 'getandroidapilevel')
+
+def is_linux() -> bool:
+    return platform.system() == 'Linux' and not is_android()
 
 def is_valid_time(time: float) -> bool:
     # If we're before 2000 or after 2050, something is wrong
@@ -387,6 +396,146 @@ class Nmcli(NetworkInterface):
         self.pending_remove = []
         self.current = None
 
+def adb_server_running() -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        # 5037 is the default socket of adb
+        return s.connect_ex(('localhost', 5037)) == 0
+
+def adb_wait_for_device() -> None:
+    if not adb_server_running():
+        # start-server must be run as root, at least on Ubuntu
+        print('starting ADB server...')
+        subprocess.run(['sudo', 'adb', 'start-server'], check=True)
+    print('waiting for Android device...')
+    subprocess.run(['adb', 'wait-for-device'], check=True)
+    subprocess.run(['adb', 'root'], check=True)
+
+def dequote(text: str) -> str:
+    if text.startswith('"') and text.endswith('"'):
+        text = text[1:-1].strip()
+    return text
+
+class Android(NetworkInterface):
+    def __init__(self) -> None:
+        super().__init__()
+        self.running_on_device = is_android()
+        if not self.running_on_device:
+            adb_wait_for_device()
+        self.source = self.run_on_android(
+            ['getprop', 'ro.product.device'],
+            raise_on_fail=True
+        ).stdout.strip() + ' (Android)'
+
+    def run_on_android(self, arg_list: list[str], raise_on_fail=False) -> Run:
+        if self.running_on_device:
+            return Run(arg_list, raise_on_fail=raise_on_fail)
+        else:
+            return Run(['adb', 'shell'] + escape_shell(arg_list), raise_on_fail=raise_on_fail)
+
+    def __str__(self) -> str:
+        return self.source
+
+    def with_update_applied(self, old: NetworkInfo, new: NetworkInfo) -> Optional[NetworkInfo]:
+        if (
+            old.ssid == new.ssid and
+            old.pswd_type == new.pswd_type and
+            old.pswd == new.pswd and
+            old.autoconnect == new.autoconnect
+        ):
+            return None
+        else:
+            if old.ssid == 'pollyblossom':
+                print('old: ' + str(old) + '\n\nnew: ' + str(new))
+            return new
+
+    def load(self) -> None:
+        # Load networks from a file because cmd wifi doesn't seem to support getting details of a specific network
+        result = self.run_on_android(
+            ['cat', '/data/misc/apexdata/com.android.wifi/WifiConfigStore.xml'],
+            raise_on_fail=True
+        ).stdout
+        root = ET.fromstring(result)
+        loaded: list[NetworkInfo] = []
+        assert root.tag == 'WifiConfigStoreData'
+        network_list = root.find('NetworkList')
+        assert network_list is not None
+        for network in network_list.iter('Network'):
+            wifi_config = network.find('WifiConfiguration')
+            assert wifi_config is not None
+            ssid: Optional[str] = None
+            pswd_type: Optional[str] = None
+            pswd: Optional[str] = None
+            autoconnect: Optional[bool] = None
+            use_network = True
+            for item in wifi_config.iter():
+                name = item.get('name')
+                if name == 'SSID':
+                    assert item.text is not None
+                    ssid = dequote(item.text)
+                if name == 'ConfigKey':
+                    assert item.text is not None
+                    key_type = item.text.rsplit('"', 1)[-1]
+                    if key_type == 'WPA_PSK':
+                        pswd_type = 'wpa'
+                    elif key_type == 'WPA_EAP':
+                        # Don't deal with ToorCamp's weird network
+                        use_network = False
+                    elif key_type == 'NONE':
+                        pswd_type = 'open'
+                    else:
+                        raise RuntimeError('Unknown ConfigKey key type: ' + key_type)
+                if name == 'PreSharedKey' and item.text is not None:
+                    pswd = dequote(item.text)
+                if name == 'AutoJoinEnabled':
+                    autoconnect = item.get('value') == 'true'
+            if use_network:
+                if ssid is None or pswd_type is None or autoconnect is None:
+                    raise RuntimeError('failed to parse network ' + str(ssid))
+                info = NetworkInfo(True, None, ssid, None, pswd_type, pswd, autoconnect, self.source, None, None, None)
+                loaded.append(info)
+        self.current = loaded
+
+    def install_network(self, n: NetworkInfo) -> None:
+        if n.pswd_type == 'open':
+            android_type = 'open'
+        elif n.pswd_type == 'wpa':
+            android_type = 'wpa2'
+        else:
+            assert False, 'Invalid password type ' + str(n.pswd_type)
+        args = ['cmd', 'wifi', 'add-network', n.ssid, android_type]
+        if n.pswd is None:
+            if n.pswd_type == 'wpa':
+                print('WARNING: network ' + n.ssid + ' is type wpa but doesn\'t have a password, ignoring network')
+                return
+        else:
+            args.append(n.pswd)
+        if not n.autoconnect:
+            args.append('-d')
+        self.run_on_android(args, raise_on_fail=True)
+
+    def delete_network(self, n: NetworkInfo) -> None:
+        # Android often lists two versions of the same network with the same ID, put them in a set
+        # so we only remove it once
+        remove_set: set[int] = set()
+        network_list_result = self.run_on_android(['cmd', 'wifi', 'list-networks'], raise_on_fail=True)
+        network_list = network_list_result.stdout.strip().splitlines()[1:]
+        for network_str in network_list:
+            network_id_str, ssid_and_type = network_str.split(' ', 1)
+            ssid = ssid_and_type.rsplit(' ', 1)[0].strip()
+            if ssid == n.ssid:
+                remove_set.add(int(network_id_str))
+        for network_id in remove_set:
+            self.run_on_android(['cmd', 'wifi', 'forget-network', str(network_id)], raise_on_fail=True)
+
+    def commit(self) -> None:
+        for network in self.pending_remove:
+            self.delete_network(network)
+        for network in self.pending_add:
+            self.install_network(network)
+        self.pending_add = []
+        self.pending_remove = []
+        self.current = None
+
 class JsonFile(NetworkInterface):
     def __init__(self, path: str) -> None:
         super().__init__()
@@ -439,13 +588,15 @@ class JsonFile(NetworkInterface):
         self.current = None
 
 def make_system_interface(args: argparse.Namespace) -> NetworkInterface:
-    errors = []
-    for interface in [Nmcli]:
-        try:
-            return interface()
-        except RuntimeError as e:
-            errors.append(str(e))
-    raise RuntimeError('\n  '.join(['No usable system interfaces detected:'] + errors))
+    if args.adb:
+        assert is_linux(), '--adb should only be used on Linux'
+        return Android()
+    elif is_linux():
+        return Nmcli()
+    elif is_android():
+        return Android()
+    else:
+        raise RuntimeError('Unsupported platform ' + platform.system())
 
 def make_config_interface(args: argparse.Namespace) -> NetworkInterface:
     path = default_json_path
@@ -458,6 +609,8 @@ def make_config_interface(args: argparse.Namespace) -> NetworkInterface:
 def make_interface(args: argparse.Namespace, interface: str):
     if interface == 'nm':
         return Nmcli()
+    elif interface == 'android':
+        return Android()
     elif interface == 'json':
         return make_config_interface(args)
     else:
@@ -517,8 +670,9 @@ def dedup_networks(args: argparse.Namespace):
 def main() -> None:
     parser = argparse.ArgumentParser(description='Save and load WiFi networks and passwords to JSON')
     parser.add_argument('-f', '--file', type=str, help='File to load networks from, default is ' + default_json_path)
+    parser.add_argument('--adb', action='store_true', help='Connect to an Android phone via ADB, the config file will still be local')
     subparsers = parser.add_subparsers()
-    interface_names = ['nm', 'json']
+    interface_names = ['nm', 'android', 'json']
     # subparsers.required = True
     # subparsers.dest = 'command'
 
