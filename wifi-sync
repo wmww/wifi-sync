@@ -262,8 +262,8 @@ class Nmcli(NetworkInterface):
             return new
 
     def name_list(self) -> list[str]:
-        out = Run([self.bin_path, '-f', 'NAME', 'connection'], raise_on_fail=True)
-        networks = [i.strip() for i in out.stdout.strip().split('\n')[1:]] # cut off "NAME" header
+        out = Run([self.bin_path, '-t', '-f', 'NAME', 'connection'], raise_on_fail=True)
+        networks = [i for i in out.stdout.strip().split('\n')[1:]] # cut off "NAME" header
         return list(set(networks))
 
     def get_created_at(self, name: str, uuid: str) -> float:
