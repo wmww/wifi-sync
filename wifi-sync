@@ -320,10 +320,13 @@ class Nmcli(NetworkInterface):
             # This means WEP, which isn't supported
             # pswd_type = 'wep'
             return None
+        elif key_mgmts[0] == 'owe':
+            # Some hacker camp bullshit
+            return None
         elif key_mgmts[0] == 'wpa-psk':
             pswd_type = 'wpa'
         else:
-            raise AssertionError('Unknown key management: ' + ' '.join(key_mgmts))
+            raise AssertionError(ssids[0] + ' has unknown key management: ' + ' '.join(key_mgmts))
         autoconnect = len(autoconnect_nos) == 0
         created_at = self.get_created_at(conn_ids[0], conn_uuids[0])
         last_seen_at_or_0 = float(last_seen_at_timestamps[0])
