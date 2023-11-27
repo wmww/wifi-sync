@@ -498,7 +498,8 @@ class Android(NetworkInterface):
 
     def install_network(self, n: NetworkInfo) -> None:
         if n.pswd_type == 'open':
-            android_type = 'open'
+            return
+            #android_type = 'open'
         elif n.pswd_type == 'wpa':
             android_type = 'wpa2'
         else:
