@@ -323,6 +323,9 @@ class Nmcli(NetworkInterface):
         elif key_mgmts[0] == 'owe':
             # Some hacker camp bullshit
             return None
+        elif key_mgmts[0] == 'sae':
+            # Seems to be something new, will probably have to support at some point
+            return None
         elif key_mgmts[0] == 'wpa-psk':
             pswd_type = 'wpa'
         else:
