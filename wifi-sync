@@ -15,7 +15,7 @@ import xml.etree.ElementTree as ET
 from typing import Optional, Any, Tuple
 
 default_json_path = os.path.expanduser('~') + '/.config/wifi-sync/networks.json'
-ignore_conn_types = ['802-3-ethernet', 'bridge', 'wireguard', 'tun', 'vpn', 'loopback']
+ignore_conn_types = ['802-3-ethernet', 'bridge', 'wireguard', 'tun', 'vpn', 'loopback', 'bluetooth']
 
 def escape_shell(arg_list: list[str]) -> list[str]:
     escaped_args: list[str] = []
