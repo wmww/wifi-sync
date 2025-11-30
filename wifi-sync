@@ -267,13 +267,14 @@ class Nmcli(NetworkInterface):
         return list(set(networks))
 
     def get_created_at(self, name: str, uuid: str) -> float:
+        name = name.replace('/', '_')
         paths = [
             os.path.join(self.data_path, name + '-' + uuid + '.nmconnection'),
             os.path.join(self.data_path, name + '-' + uuid),
             os.path.join(self.data_path, name + '.nmconnection'),
             os.path.join(self.data_path, name),
         ]
-        time = math.inf
+        time = None
         for path in paths:
             try:
                 time = os.path.getmtime(path)
@@ -285,6 +286,7 @@ class Nmcli(NetworkInterface):
                     str(e) + '\nyou may want to run:\n' +
                     'sudo chmod o+x ' + self.data_path
                 )
+        assert time is not None, 'Failed to find file for network ' + name
         assert is_valid_time(time), 'Invalid time ' + str(time) + ' for network ' + name
         return time
 
